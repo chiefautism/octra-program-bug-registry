@@ -10,18 +10,18 @@ it is not a claim that aml itself is broken.
 
 | id | bug pattern | where to look | main risk | severity |
 |---|---|---|---|---|
-| opbr-000 | signed amount in money logic | transfers, withdraws, swaps, mint/burn | negative amount can mint value or corrupt balances | critical |
-| opbr-001 | unsafe signed delta accounting | pnl, funding, rebalance, slash/reward logic | signed delta can create negative state or fake credit | critical / high |
-| opbr-002 | negative allowance | grant, approve, pull, transfer_from | allowance can increase or funds can move incorrectly | critical |
-| opbr-003 | negative withdraw | withdraw, unstake, redeem, remove_liquidity | fake deposits, reversed accounting, vault drain | critical |
-| opbr-004 | unchecked constructor parameters | constructor, init, deploy params | program starts with broken supply, reserves, fees, owner, or threshold | critical / high |
-| opbr-005 | broken supply invariant | transfer, mint, burn, bridge mint/burn | total_supply stops matching balances | critical |
-| opbr-006 | broken vault accounting | deposit, withdraw, stake, redeem, harvest | vault insolvency, wrong shares, stuck funds | critical / high |
-| opbr-007 | missing or wrong auth | mint, set_owner, set_oracle, pause, execute | anyone can run admin logic | critical |
-| opbr-008 | unsafe oracle / price feed usage | mint, redeem, borrow, liquidate, swap | stale or bad price breaks accounting | critical / high |
-| opbr-009 | checks-effects-interactions violation | withdraw, claim, execute, swap, redeem | state updated too late, double action or stale state | critical / high |
-| opbr-010 | replay / double execution | claims, bridge messages, signatures, proposals | same action can be used more than once | critical |
-| opbr-011 | unchecked inter-program call result | call(...), execute, swap, bridge_call | program continues after failed external call | critical / high |
+| [opbr-000](#opbr-000-signed-amount-in-money-logic) | signed amount in money logic | transfers, withdraws, swaps, mint/burn | negative amount can mint value or corrupt balances | critical |
+| [opbr-001](#opbr-001-unsafe-signed-delta-accounting) | unsafe signed delta accounting | pnl, funding, rebalance, slash/reward logic | signed delta can create negative state or fake credit | critical / high |
+| [opbr-002](#opbr-002-negative-allowance) | negative allowance | grant, approve, pull, transfer_from | allowance can increase or funds can move incorrectly | critical |
+| [opbr-003](#opbr-003-negative-withdraw) | negative withdraw | withdraw, unstake, redeem, remove_liquidity | fake deposits, reversed accounting, vault drain | critical |
+| [opbr-004](#opbr-004-unchecked-constructor-parameters) | unchecked constructor parameters | constructor, init, deploy params | program starts with broken supply, reserves, fees, owner, or threshold | critical / high |
+| [opbr-005](#opbr-005-broken-supply-invariant) | broken supply invariant | transfer, mint, burn, bridge mint/burn | total_supply stops matching balances | critical |
+| [opbr-006](#opbr-006-broken-vault-accounting) | broken vault accounting | deposit, withdraw, stake, redeem, harvest | vault insolvency, wrong shares, stuck funds | critical / high |
+| [opbr-007](#opbr-007-missing-or-wrong-auth) | missing or wrong auth | mint, set_owner, set_oracle, pause, execute | anyone can run admin logic | critical |
+| [opbr-008](#opbr-008-unsafe-oracle--price-feed-usage) | unsafe oracle / price feed usage | mint, redeem, borrow, liquidate, swap | stale or bad price breaks accounting | critical / high |
+| [opbr-009](#opbr-009-checks-effects-interactions-violation) | checks-effects-interactions violation | withdraw, claim, execute, swap, redeem | state updated too late, double action or stale state | critical / high |
+| [opbr-010](#opbr-010-replay--double-execution) | replay / double execution | claims, bridge messages, signatures, proposals | same action can be used more than once | critical |
+| [opbr-011](#opbr-011-unchecked-inter-program-call-result) | unchecked inter-program call result | call(...), execute, swap, bridge_call | program continues after failed external call | critical / high |
 
 ## scope
 
