@@ -6,6 +6,23 @@ this registry is about program logic, templates, and examples.
 
 it is not a claim that aml itself is broken.
 
+## bug index
+
+| id | bug pattern | where to look | main risk | severity |
+|---|---|---|---|---|
+| opbr-000 | signed amount in money logic | transfers, withdraws, swaps, mint/burn | negative amount can mint value or corrupt balances | critical |
+| opbr-001 | unsafe signed delta accounting | pnl, funding, rebalance, slash/reward logic | signed delta can create negative state or fake credit | critical / high |
+| opbr-002 | negative allowance | grant, approve, pull, transfer_from | allowance can increase or funds can move incorrectly | critical |
+| opbr-003 | negative withdraw | withdraw, unstake, redeem, remove_liquidity | fake deposits, reversed accounting, vault drain | critical |
+| opbr-004 | unchecked constructor parameters | constructor, init, deploy params | program starts with broken supply, reserves, fees, owner, or threshold | critical / high |
+| opbr-005 | broken supply invariant | transfer, mint, burn, bridge mint/burn | total_supply stops matching balances | critical |
+| opbr-006 | broken vault accounting | deposit, withdraw, stake, redeem, harvest | vault insolvency, wrong shares, stuck funds | critical / high |
+| opbr-007 | missing or wrong auth | mint, set_owner, set_oracle, pause, execute | anyone can run admin logic | critical |
+| opbr-008 | unsafe oracle / price feed usage | mint, redeem, borrow, liquidate, swap | stale or bad price breaks accounting | critical / high |
+| opbr-009 | checks-effects-interactions violation | withdraw, claim, execute, swap, redeem | state updated too late, double action or stale state | critical / high |
+| opbr-010 | replay / double execution | claims, bridge messages, signatures, proposals | same action can be used more than once | critical |
+| opbr-011 | unchecked inter-program call result | call(...), execute, swap, bridge_call | program continues after failed external call | critical / high |
+
 ## scope
 
 this registry covers bugs in:
@@ -1885,8 +1902,7 @@ high if wrong order can corrupt reserves, shares, rewards, or accounting
 
 medium if it only causes inconsistent state or bad events
 
-
-# opbr-011: replay / double execution
+# opbr-010: replay / double execution
 
 ## summary
 
@@ -2095,3 +2111,180 @@ critical if replay can mint, withdraw, bridge, or execute funds twice
 high if replay can double vote, double claim rewards, or fill orders twice
 
 medium if replay only causes duplicate events or wrong accounting
+
+# opbr-011: unchecked inter-program call result
+
+## summary
+
+aml programs can call other programs with `call(...)`.
+
+`call(...)` returns whether the external program call succeeded.
+
+if the result is ignored, the program may continue as if the external call worked, even when it failed.
+
+this is similar to the ethereum bug class:
+
+```text
+unchecked call return value
+```
+
+## where to look
+
+check functions like:
+
+- `execute`
+- `admin_call`
+- `forward`
+- `swap`
+- `redeem`
+- `bridge_call`
+- `finalize_message`
+- `claim_and_call`
+- `batch_call`
+
+look for code like:
+
+```rust
+call(target, method, args...)
+```
+
+## why it is dangerous
+
+the program may update its own state, call another program, ignore failure, and return success.
+
+this can create broken state.
+
+examples:
+
+```text
+proposal marked executed, but target call failed
+bridge message marked processed, but target call failed
+swap state updated, but token transfer failed
+redeem marked complete, but payout call failed
+```
+
+## bad example
+
+```rust
+fn execute(id: u128): bool {
+  // check: proposal was not executed
+  require(!self.executed[id], "already executed")
+
+  // effect: mark proposal as executed
+  self.executed[id] = true
+
+  // bad: external call result is ignored
+  call(self.target[id], self.method[id], self.arg[id])
+
+  return true
+}
+```
+
+why bad:
+
+```text
+if call(...) fails, executed[id] may still be true unless the program reverts.
+the proposal cannot be retried, but the action did not happen.
+```
+
+## fixed example
+
+```rust
+fn execute(id: u128): bool {
+  // check: proposal was not executed
+  require(!self.executed[id], "already executed")
+
+  // effect: mark proposal as executed
+  self.executed[id] = true
+
+  // good: require external call success
+  require(
+    call(self.target[id], self.method[id], self.arg[id]),
+    "external call failed"
+  )
+
+  return true
+}
+```
+
+## bad example: token swap
+
+```rust
+fn swap(amount_x: int, amount_y: int, recipient: address): bool {
+  require(amount_x > 0, "invalid amount x")
+  require(amount_y > 0, "invalid amount y")
+  assert_address(recipient)
+
+  // bad: pull may fail, but result is ignored
+  call(self.token_x, "pull", caller, self_addr, amount_x)
+
+  // bad: transfer may fail, but result is ignored
+  call(self.token_y, "transfer", recipient, amount_y)
+
+  return true
+}
+```
+
+## fixed example: token swap
+
+```rust
+fn swap(amount_x: int, amount_y: int, recipient: address): bool {
+  require(amount_x > 0, "invalid amount x")
+  require(amount_y > 0, "invalid amount y")
+  assert_address(recipient)
+
+  // good: stop if token_x pull fails
+  require(
+    call(self.token_x, "pull", caller, self_addr, amount_x),
+    "pull token x failed"
+  )
+
+  // good: stop if token_y transfer fails
+  require(
+    call(self.token_y, "transfer", recipient, amount_y),
+    "push token y failed"
+  )
+
+  return true
+}
+```
+
+## audit check
+
+flag every inter-program call where:
+
+```text
+call(...) is not inside require(...)
+call(...) result is not assigned and checked
+state is updated as if the call succeeded
+message/proposal/order is consumed before unchecked call
+swap/redeem/bridge logic ignores call failure
+```
+
+good patterns:
+
+```rust
+require(call(target, method, args...), "external call failed")
+```
+
+or:
+
+```rust
+let ok = call(target, method, args...)
+require(ok, "external call failed")
+```
+
+## rule of thumb
+
+```text
+never ignore call(...).
+if another program must do something, require that it actually succeeded.
+```
+
+## severity
+
+critical if unchecked call failure can fake execution, lock funds, consume bridge messages, or break swaps.
+
+high if it can corrupt accounting, proposals, orders, or redemptions.
+
+medium if it only causes bad events or wrong UI state
