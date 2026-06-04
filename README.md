@@ -21,7 +21,15 @@ it is not a claim that aml itself is broken.
 | [opbr-008](#opbr-008-unsafe-oracle--price-feed-usage) | unsafe oracle / price feed usage | mint, redeem, borrow, liquidate, swap | stale or bad price breaks accounting | critical / high |
 | [opbr-009](#opbr-009-checks-effects-interactions-violation) | checks-effects-interactions violation | withdraw, claim, execute, swap, redeem | state updated too late, double action or stale state | critical / high |
 | [opbr-010](#opbr-010-replay--double-execution) | replay / double execution | claims, bridge messages, signatures, proposals | same action can be used more than once | critical |
-| [opbr-011](#opbr-011-unchecked-inter-program-call-result) | unchecked inter-program call result | call(...), execute, swap, bridge_call | program continues after failed external call | critical / high |
+| [opbr-011](#opbr-011-unchecked-call-or-transfer-result) | unchecked call or transfer result | call(...), transfer(...), execute, swap, bridge_call | program continues after failed external action | critical / high |
+| [opbr-012](#opbr-012-reentrancy--missing-nonreentrant-guard) | reentrancy / missing nonreentrant guard | withdraw, claim, redeem, execute, payout | callback can repeat an action before the first call finishes | critical / high |
+| [opbr-014](#opbr-014-missing-exists-flag--default-map-state) | missing exists flag / default map state | proposals, claims, orders, positions, messages | unknown id can pass checks using default map values | critical / high |
+| [opbr-015](#opbr-015-broken-accounting--economic-invariant) | broken accounting / economic invariant | tokens, vaults, AMMs, bridges, governance | checks pass but core accounting rule becomes false | critical / high |
+| [opbr-016](#opbr-016-rounding--zero-shares) | rounding / zero shares | vault deposits, redeems, swaps, share math | deposit or swap is accepted while output rounds to zero | high / medium |
+| [opbr-017](#opbr-017-bad-id-bounds--negative-id) | bad id bounds / negative id | proposals, claims, models, positions, orders | negative id can pass upper-bound checks | high / medium |
+| [opbr-018](#opbr-018-duplicate-signer--bad-threshold) | duplicate signer / bad threshold | multisigs, governance, committees, bridges | quorum can be bypassed or made impossible | critical / high |
+| [opbr-019](#opbr-019-pause--emergency-bypass) | pause / emergency bypass | pause, emergency withdraw, admin recovery | paused systems can still move funds through alternate paths | critical / high |
+| [opbr-020](#opbr-020-unbounded-loops--resource-dos) | unbounded loops / resource DoS | batch actions, rewards, owners, proposals | user-controlled loops can make calls too expensive or impossible | high / medium |
 
 ## scope
 
@@ -56,11 +64,13 @@ each bug entry should include:
 
 money values should not be negative.
 
-use unsigned types for asset quantities and ids
+prefer `u128` or another unsigned integer type for asset quantities and ids where the target compiler/runtime supports it
 
 use signed types only for explicit deltas, changes, or values that are allowed to go below zero
 
 if a program uses `int` for amounts, balances, reserves, deposits, supply, or allowances, the program must check that the value is non-negative or positive
+
+do not use a `u128` annotation as a replacement for checks around zero amounts, insufficient balances, missing authorization, replay, arithmetic bounds, or accounting invariants
 
 ## where to look
 
@@ -148,9 +158,9 @@ fn transfer(to: address, amount: int): bool {
 }
 ```
 
-## better fix
+## main fix, where supported
 
-use an unsigned type for money values if available:
+use `u128` or another unsigned type for money values where the target compiler/runtime supports it:
 
 ```aml
 fn transfer(to: address, amount: u128): bool {
@@ -176,6 +186,10 @@ and amount can be negative
 and amount is used in balance/supply/reserve accounting
 and there is no require(amount > 0) or require(amount >= 0)
 ```
+
+prefer changing money values from signed `int` to an unsigned type where the target compiler/runtime supports it, then keep explicit checks for zero, balances, permissions, arithmetic bounds, and invariants.
+
+if an unsigned parameter only lacks `amount > 0`, classify that as a warning unless zero can consume replay state, create misleading events, or break accounting. unchecked arithmetic like `10 - 20` belongs in the arithmetic bounds category, not the zero-guard warning category.
 
 ## severity
 
@@ -216,7 +230,7 @@ check functions like:
 
 look for parameters like:
 
-```rust
+```aml
 delta: int
 pnl: int
 change: int
@@ -240,7 +254,7 @@ make accounting unrecoverable
 
 ## bad example
 
-```rust
+```aml
 state {
   balances: map[address]int
   total_supply: int
@@ -265,7 +279,7 @@ any caller can apply arbitrary balance changes if auth is also missing.
 
 ## fixed example
 
-```rust
+```aml
 state {
   owner: address
   balances: map[address]int
@@ -289,11 +303,11 @@ fn apply_delta(user: address, delta: int): bool {
 }
 ```
 
-## better pattern
+## better pattern, where unsigned integers are supported
 
 keep balances unsigned, and handle direction explicitly:
 
-```rust
+```aml
 state {
   owner: address
   balances: map[address]u128
@@ -387,14 +401,14 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 grants: map[address]map[address]int
 allowances: map[address]map[address]int
 ```
 
 and parameters like:
 
-```rust
+```aml
 amount: int
 amt: int
 allowance: int
@@ -404,7 +418,7 @@ allowance: int
 
 a common allowance check is:
 
-```rust
+```aml
 require(allowed >= amount, "insufficient allowance")
 ```
 
@@ -418,7 +432,7 @@ that is true.
 
 then this line becomes dangerous:
 
-```rust
+```aml
 self.grants[from][caller] = allowed - amount
 ```
 
@@ -432,7 +446,7 @@ a negative pull amount can increase allowance instead of decreasing it.
 
 ## bad example
 
-```rust
+```aml
 fn grant(spender: address, amount: int): bool {
   self.grants[caller][spender] = amount
   return true
@@ -455,7 +469,7 @@ fn pull(from: address, to: address, amount: int): bool {
 
 ## fixed example
 
-```rust
+```aml
 fn grant(spender: address, amount: int): bool {
   require(amount >= 0, "invalid allowance")
 
@@ -480,15 +494,15 @@ fn pull(from: address, to: address, amount: int): bool {
 }
 ```
 
-## better fix
+## better fix, where unsigned integers are supported
 
 use unsigned types for allowances and transfer amounts:
 
-```rust
+```aml
 grants: map[address]map[address]u128
 ```
 
-```rust
+```aml
 fn grant(spender: address, amount: u128): bool {
   self.grants[caller][spender] = amount
   return true
@@ -549,7 +563,7 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 deposits: map[address]int
 stakes: map[address]int
 shares: map[address]int
@@ -559,7 +573,7 @@ total_locked: int
 
 and parameters like:
 
-```rust
+```aml
 amount: int
 amt: int
 shares: int
@@ -569,7 +583,7 @@ shares: int
 
 a common withdraw check is:
 
-```rust
+```aml
 require(user_balance >= amount, "insufficient balance")
 ```
 
@@ -583,7 +597,7 @@ that is true.
 
 then this line becomes dangerous:
 
-```rust
+```aml
 self.deposits[caller] = user_balance - amount
 ```
 
@@ -597,7 +611,7 @@ the withdraw can increase the user's recorded deposit instead of reducing it.
 
 ## bad example
 
-```rust
+```aml
 state {
   deposits: map[address]int
   total_locked: int
@@ -626,7 +640,7 @@ nonreentrant fn withdraw(amount: int): bool {
 
 ## fixed example
 
-```rust
+```aml
 state {
   deposits: map[address]int
   total_locked: int
@@ -650,16 +664,16 @@ nonreentrant fn withdraw(amount: int): bool {
   self.deposits[caller] = bal - amount
   self.total_locked -= amount
 
-  transfer(caller, amount)
+  require(transfer(caller, amount), "transfer failed")
   return true
 }
 ```
 
-## better fix
+## better fix, where unsigned integers are supported
 
 use unsigned types for deposits and withdraw amounts:
 
-```rust
+```aml
 state {
   deposits: map[address]u128
   total_locked: u128
@@ -674,7 +688,7 @@ nonreentrant fn withdraw(amount: u128): bool {
   self.deposits[caller] = bal - amount
   self.total_locked -= amount
 
-  transfer(caller, amount)
+  require(transfer(caller, amount), "transfer failed")
   return true
 }
 ```
@@ -729,7 +743,7 @@ check:
 
 look for parameters like:
 
-```rust
+```aml
 initial_supply: int
 reserve_a: int
 reserve_b: int
@@ -766,7 +780,7 @@ this can cause:
 
 ## bad example
 
-```rust
+```aml
 state {
   owner: address
   total_supply: int
@@ -783,7 +797,7 @@ constructor(initial_supply: int, fee_bps: int) {
 
 ## fixed example
 
-```rust
+```aml
 state {
   owner: address
   total_supply: int
@@ -806,7 +820,7 @@ constructor(initial_supply: int, fee_bps: int) {
 
 ## bad example: multisig
 
-```rust
+```aml
 state {
   threshold: int
   signer_count: int
@@ -820,7 +834,7 @@ constructor(threshold: int, signer_count: int) {
 
 ## fixed example: multisig
 
-```rust
+```aml
 state {
   threshold: int
   signer_count: int
@@ -838,7 +852,7 @@ constructor(threshold: int, signer_count: int) {
 
 ## bad example: amm
 
-```rust
+```aml
 state {
   reserve_a: int
   reserve_b: int
@@ -852,7 +866,7 @@ constructor(reserve_a: int, reserve_b: int) {
 
 ## fixed example: amm
 
-```rust
+```aml
 state {
   reserve_a: int
   reserve_b: int
@@ -922,14 +936,14 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 total_supply: int
 balances: map[address]int
 ```
 
-or:
+or, where unsigned integers are supported:
 
-```rust
+```aml
 total_supply: u128
 balances: map[address]u128
 ```
@@ -948,7 +962,7 @@ if token supply and balances drift apart, the program may allow:
 
 ## bad example: transfer changes supply
 
-```rust
+```aml
 fn transfer(to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -972,7 +986,7 @@ it should not increase total_supply.
 
 ## fixed example: transfer does not change supply
 
-```rust
+```aml
 fn transfer(to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -988,7 +1002,7 @@ fn transfer(to: address, amount: int): bool {
 
 ## bad example: mint updates balance but not supply
 
-```rust
+```aml
 fn mint(to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
   require(caller == self.owner, "not owner")
@@ -1007,7 +1021,7 @@ new tokens were created, but total_supply was not increased.
 
 ## fixed example: mint updates balance and supply
 
-```rust
+```aml
 fn mint(to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
   require(caller == self.owner, "not owner")
@@ -1022,7 +1036,7 @@ fn mint(to: address, amount: int): bool {
 
 ## bad example: burn updates supply but not balance
 
-```rust
+```aml
 fn burn(amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -1040,7 +1054,7 @@ supply decreased, but the caller still has the same balance.
 
 ## fixed example: burn updates both balance and supply
 
-```rust
+```aml
 fn burn(amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -1131,7 +1145,7 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 deposits: map[address]int
 shares: map[address]int
 total_locked: int
@@ -1152,7 +1166,7 @@ if vault accounting is wrong, users may be able to:
 
 ## bad example: deposit does not update total
 
-```rust
+```aml
 state {
   deposits: map[address]int
   total_locked: int
@@ -1175,7 +1189,7 @@ user deposit increased, but total_locked did not.
 
 ## fixed example
 
-```rust
+```aml
 state {
   deposits: map[address]int
   total_locked: int
@@ -1193,7 +1207,7 @@ payable fn deposit(): bool {
 
 ## bad example: withdraw does not update deposit
 
-```rust
+```aml
 nonreentrant fn withdraw(amount: int): bool {
   require(amount > 0, "invalid amount")
   require(self.deposits[caller] >= amount, "insufficient deposit")
@@ -1214,7 +1228,7 @@ the user may withdraw again.
 
 ## fixed example
 
-```rust
+```aml
 nonreentrant fn withdraw(amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -1224,14 +1238,14 @@ nonreentrant fn withdraw(amount: int): bool {
   self.deposits[caller] = bal - amount
   self.total_locked -= amount
 
-  transfer(caller, amount)
+  require(transfer(caller, amount), "transfer failed")
   return true
 }
 ```
 
 ## bad example: share minting ignores existing assets
 
-```rust
+```aml
 state {
   shares: map[address]int
   total_shares: int
@@ -1259,7 +1273,7 @@ if the vault already has yield or donated funds, minting 1 share per 1 asset can
 
 ## safer share minting example
 
-```rust
+```aml
 state {
   shares: map[address]int
   total_shares: int
@@ -1360,7 +1374,7 @@ anyone can execute multisig actions
 
 ## bad example
 
-```rust
+```aml
 fn mint(to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
 
@@ -1380,7 +1394,7 @@ anyone can mint.
 
 ## fixed example
 
-```rust
+```aml
 fn mint(to: address, amount: int): bool {
   require(caller == self.owner, "not owner")
   require(amount > 0, "invalid amount")
@@ -1399,7 +1413,7 @@ using `origin` for auth is usually dangerous.
 
 bad:
 
-```rust
+```aml
 fn set_fee(fee_bps: int): bool {
   require(origin == self.owner, "not owner")
 
@@ -1410,7 +1424,7 @@ fn set_fee(fee_bps: int): bool {
 
 fixed:
 
-```rust
+```aml
 fn set_fee(fee_bps: int): bool {
   require(caller == self.owner, "not owner")
   require(fee_bps >= 0, "invalid fee")
@@ -1483,7 +1497,7 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 oracle: address
 price: int
 last_price_update: int
@@ -1518,7 +1532,7 @@ stablecoin depeg
 
 ## bad example
 
-```rust
+```aml
 state {
   oracle: address
   price: int
@@ -1549,7 +1563,7 @@ mint trusts price blindly.
 
 ## fixed example
 
-```rust
+```aml
 state {
   oracle: address
   price: int
@@ -1577,7 +1591,7 @@ payable fn mint(): bool {
 
 ## better example
 
-```rust
+```aml
 state {
   oracle: address
   price: int
@@ -1672,9 +1686,9 @@ check functions like:
 
 look for external actions like:
 
-```rust
+```aml
 transfer(to, amount)
-call(target, value, data)
+call(target, method, args...)
 deploy(...)
 ```
 
@@ -1711,7 +1725,7 @@ stale accounting
 
 ## bad example: claim flag updated after transfer
 
-```rust
+```aml
 fn claim(id: int): bool {
   // check: user has something to claim
   require(self.claimable[id][caller] > 0, "nothing to claim")
@@ -1739,7 +1753,7 @@ the claim is still active during the external transfer.
 
 ## fixed example
 
-```rust
+```aml
 fn claim(id: int): bool {
   // check: user has something to claim
   require(self.claimable[id][caller] > 0, "nothing to claim")
@@ -1751,7 +1765,7 @@ fn claim(id: int): bool {
   self.claimable[id][caller] = 0
 
   // interaction: external transfer happens last
-  transfer(caller, amount)
+  require(transfer(caller, amount), "transfer failed")
 
   return true
 }
@@ -1759,8 +1773,8 @@ fn claim(id: int): bool {
 
 ## bad example: proposal marked executed after call
 
-```rust
-fn execute(id: int): bool {
+```aml
+fn execute(id: u128): bool {
   // check: enough approvals
   require(self.approvals[id] >= self.threshold, "not enough approvals")
 
@@ -1769,7 +1783,7 @@ fn execute(id: int): bool {
 
   // interaction: external call happens first
   // bad: proposal is still marked as not executed here
-  call(self.target[id], self.value[id], self.data[id])
+  call(self.target[id], self.method[id], self.args[id])
 
   // effect: executed flag is updated too late
   self.executed[id] = true
@@ -1786,8 +1800,8 @@ the external call happens while the proposal is still marked as not executed.
 
 ## fixed example
 
-```rust
-fn execute(id: int): bool {
+```aml
+fn execute(id: u128): bool {
   // check: enough approvals
   require(self.approvals[id] >= self.threshold, "not enough approvals")
 
@@ -1798,7 +1812,10 @@ fn execute(id: int): bool {
   self.executed[id] = true
 
   // interaction: external call happens last
-  call(self.target[id], self.value[id], self.data[id])
+  require(
+    call(self.target[id], self.method[id], self.args[id]),
+    "proposal call failed"
+  )
 
   return true
 }
@@ -1806,7 +1823,7 @@ fn execute(id: int): bool {
 
 ## bad example: reserves updated after payout
 
-```rust
+```aml
 fn swap(amount_in: int): int {
   // check: input must be positive
   require(amount_in > 0, "invalid amount")
@@ -1838,7 +1855,7 @@ during the external action, reserve state is stale.
 
 ## fixed example
 
-```rust
+```aml
 fn swap(amount_in: int): int {
   // check: input must be positive
   require(amount_in > 0, "invalid amount")
@@ -1859,7 +1876,7 @@ fn swap(amount_in: int): int {
   self.reserve_y -= out
 
   // interaction: payout happens last
-  transfer(caller, out)
+  require(transfer(caller, out), "transfer failed")
 
   return out
 }
@@ -1936,11 +1953,11 @@ check functions like:
 
 look for state like:
 
-```rust
+```aml
 executed: map[u128]bool
 claimed: map[u128]map[address]bool
 used_nonce: map[address]map[u128]bool
-processed_message: map[bytes32]bool
+processed_message: map[u128]bool
 ```
 
 ## why it is dangerous
@@ -1960,7 +1977,7 @@ double multisig execute
 
 ## bad example: bridge message can be reused
 
-```rust
+```aml
 fn finalize_bridge(message_id: u128, to: address, amount: int): bool {
   require(amount > 0, "invalid amount")
   assert_address(to)
@@ -1983,7 +2000,7 @@ the same message can be submitted again.
 
 ## fixed example
 
-```rust
+```aml
 state {
   processed_messages: map[u128]bool
   balances: map[address]int
@@ -2008,8 +2025,8 @@ fn finalize_bridge(message_id: u128, to: address, amount: int): bool {
 
 ## bad example: airdrop claim can be repeated
 
-```rust
-fn claim_airdrop(drop_id: u128, amount: int, proof: bytes): bool {
+```aml
+fn claim_airdrop(drop_id: u128, amount: int, proof: string): bool {
   require(amount > 0, "invalid amount")
   require(verify_proof(drop_id, caller, amount, proof), "invalid proof")
 
@@ -2022,14 +2039,14 @@ fn claim_airdrop(drop_id: u128, amount: int, proof: bytes): bool {
 
 ## fixed example
 
-```rust
+```aml
 state {
   claimed: map[u128]map[address]bool
   balances: map[address]int
   total_supply: int
 }
 
-fn claim_airdrop(drop_id: u128, amount: int, proof: bytes): bool {
+fn claim_airdrop(drop_id: u128, amount: int, proof: string): bool {
   require(amount > 0, "invalid amount")
   require(!self.claimed[drop_id][caller], "already claimed")
   require(verify_proof(drop_id, caller, amount, proof), "invalid proof")
@@ -2045,8 +2062,8 @@ fn claim_airdrop(drop_id: u128, amount: int, proof: bytes): bool {
 
 ## bad example: signature nonce not used
 
-```rust
-fn use_signature(owner: address, amount: int, nonce: u128, sig: bytes): bool {
+```aml
+fn use_signature(owner: address, amount: int, nonce: u128, sig: string): bool {
   require(amount > 0, "invalid amount")
   require(verify_sig(owner, amount, nonce, sig), "bad signature")
 
@@ -2059,13 +2076,13 @@ fn use_signature(owner: address, amount: int, nonce: u128, sig: bytes): bool {
 
 ## fixed example
 
-```rust
+```aml
 state {
   used_nonce: map[address]map[u128]bool
   balances: map[address]int
 }
 
-fn use_signature(owner: address, amount: int, nonce: u128, sig: bytes): bool {
+fn use_signature(owner: address, amount: int, nonce: u128, sig: string): bool {
   require(amount > 0, "invalid amount")
   assert_address(owner)
 
@@ -2112,15 +2129,15 @@ high if replay can double vote, double claim rewards, or fill orders twice
 
 medium if replay only causes duplicate events or wrong accounting
 
-# opbr-011: unchecked inter-program call result
+# opbr-011: unchecked call or transfer result
 
 ## summary
 
-aml programs can call other programs with `call(...)`.
+aml programs can call other programs with `call(...)` and can send native OCT with `transfer(...)`.
 
-`call(...)` returns whether the external program call succeeded.
+`call(...)` returns whether the external program call succeeded. official examples also use `transfer(...)` in checked forms such as `require(transfer(...), "transfer failed")`.
 
-if the result is ignored, the program may continue as if the external call worked, even when it failed.
+if the result is ignored, the program may continue as if the external action worked, even when it failed.
 
 this is similar to the ethereum bug class:
 
@@ -2141,16 +2158,20 @@ check functions like:
 - `finalize_message`
 - `claim_and_call`
 - `batch_call`
+- `withdraw`
+- `release`
+- `refund`
 
 look for code like:
 
-```rust
+```aml
 call(target, method, args...)
+transfer(to, amount)
 ```
 
 ## why it is dangerous
 
-the program may update its own state, call another program, ignore failure, and return success.
+the program may update its own state, call another program or transfer OCT, ignore failure, and return success.
 
 this can create broken state.
 
@@ -2160,12 +2181,12 @@ examples:
 proposal marked executed, but target call failed
 bridge message marked processed, but target call failed
 swap state updated, but token transfer failed
-redeem marked complete, but payout call failed
+redeem marked complete, but payout transfer failed
 ```
 
 ## bad example
 
-```rust
+```aml
 fn execute(id: u128): bool {
   // check: proposal was not executed
   require(!self.executed[id], "already executed")
@@ -2189,7 +2210,7 @@ the proposal cannot be retried, but the action did not happen.
 
 ## fixed example
 
-```rust
+```aml
 fn execute(id: u128): bool {
   // check: proposal was not executed
   require(!self.executed[id], "already executed")
@@ -2209,7 +2230,7 @@ fn execute(id: u128): bool {
 
 ## bad example: token swap
 
-```rust
+```aml
 fn swap(amount_x: int, amount_y: int, recipient: address): bool {
   require(amount_x > 0, "invalid amount x")
   require(amount_y > 0, "invalid amount y")
@@ -2227,7 +2248,7 @@ fn swap(amount_x: int, amount_y: int, recipient: address): bool {
 
 ## fixed example: token swap
 
-```rust
+```aml
 fn swap(amount_x: int, amount_y: int, recipient: address): bool {
   require(amount_x > 0, "invalid amount x")
   require(amount_y > 0, "invalid amount y")
@@ -2251,25 +2272,27 @@ fn swap(amount_x: int, amount_y: int, recipient: address): bool {
 
 ## audit check
 
-flag every inter-program call where:
+flag every external action where:
 
 ```text
 call(...) is not inside require(...)
 call(...) result is not assigned and checked
-state is updated as if the call succeeded
-message/proposal/order is consumed before unchecked call
-swap/redeem/bridge logic ignores call failure
+transfer(...) result is not checked when payout success matters
+state is updated as if the external action succeeded
+message/proposal/order is consumed before unchecked call or transfer
+swap/redeem/bridge logic ignores external action failure
 ```
 
 good patterns:
 
-```rust
+```aml
 require(call(target, method, args...), "external call failed")
+require(transfer(to, amount), "transfer failed")
 ```
 
 or:
 
-```rust
+```aml
 let ok = call(target, method, args...)
 require(ok, "external call failed")
 ```
@@ -2288,3 +2311,1517 @@ critical if unchecked call failure can fake execution, lock funds, consume bridg
 high if it can corrupt accounting, proposals, orders, or redemptions.
 
 medium if it only causes bad events or wrong UI state
+
+# opbr-012: reentrancy / missing nonreentrant guard
+
+## summary
+
+reentrancy happens when a program starts an external action, such as `transfer(...)` or `call(...)`, and the external side can enter the program again before the first execution has finished.
+
+if the first execution has not fully updated or locked the state, the second execution can pass the same checks again.
+
+in AML, the practical guard is simple:
+
+```aml
+nonreentrant fn withdraw(amount: int): bool {
+  ...
+}
+```
+
+so yes: for reentrancy-sensitive entrypoints, you often just write `nonreentrant fn`.
+
+this matches the official vault template style, where withdraw-like logic is declared as `nonreentrant fn withdraw(...)`.
+
+that guard is not a replacement for checks-effects-interactions. use both:
+
+```text
+nonreentrant entrypoint
+checks
+effects
+checked interaction
+```
+
+## where to look
+
+check functions like:
+
+- `withdraw`
+- `claim`
+- `redeem`
+- `unstake`
+- `release`
+- `refund`
+- `execute`
+- `swap`
+- `bridge_finalize`
+
+look for functions that:
+
+```text
+read a user balance, claim, proposal, or escrow state
+then call transfer(...) or call(...)
+and are declared as fn instead of nonreentrant fn
+```
+
+## why it is dangerous
+
+if a withdraw-like function can be entered again before the first call finishes, the same balance or claim may be used more than once.
+
+this can lead to:
+
+```text
+double withdraw
+double claim
+double redeem
+double proposal execution
+stale reserve usage
+vault drain
+```
+
+## bad example
+
+```aml
+state {
+  deposits: map[address]int
+  total_locked: int
+}
+
+fn withdraw(amount: int): bool {
+  require(amount > 0, "invalid amount")
+
+  let bal = self.deposits[caller]
+  require(bal >= amount, "insufficient deposit")
+
+  // bad: external payout happens while the old balance is still stored
+  require(transfer(caller, amount), "transfer failed")
+
+  self.deposits[caller] = bal - amount
+  self.total_locked -= amount
+
+  return true
+}
+```
+
+## fixed example
+
+```aml
+state {
+  deposits: map[address]int
+  total_locked: int
+}
+
+nonreentrant fn withdraw(amount: int): bool {
+  require(amount > 0, "invalid amount")
+
+  let bal = self.deposits[caller]
+  require(bal >= amount, "insufficient deposit")
+
+  self.deposits[caller] = bal - amount
+  self.total_locked -= amount
+
+  require(transfer(caller, amount), "transfer failed")
+  return true
+}
+```
+
+## better fix, where unsigned integers are supported
+
+use `u128` for deposits and amounts where supported, keep the `nonreentrant` guard, and still check zero amounts and transfer success:
+
+```aml
+state {
+  deposits: map[address]u128
+  total_locked: u128
+}
+
+nonreentrant fn withdraw(amount: u128): bool {
+  require(amount > 0, "invalid amount")
+
+  let bal = self.deposits[caller]
+  require(bal >= amount, "insufficient deposit")
+
+  self.deposits[caller] = bal - amount
+  self.total_locked -= amount
+
+  require(transfer(caller, amount), "transfer failed")
+  return true
+}
+```
+
+## audit check
+
+flag externally callable functions where:
+
+```text
+function sends OCT with transfer(...)
+or function calls another program with call(...)
+and function reads or updates user/proposal/claim/vault state
+and function is declared as fn instead of nonreentrant fn
+```
+
+also flag:
+
+```text
+external action happens before state update
+transfer(...) or call(...) result is ignored
+nonreentrant is used but amount can be negative
+nonreentrant is used but replay/claimed/executed flags are missing
+```
+
+## rule of thumb
+
+```text
+if an entrypoint pays out or calls out after reading sensitive state, write nonreentrant fn.
+then still update state before the external action and require the external action to succeed.
+```
+
+## severity
+
+critical if reentrancy can drain funds, withdraw twice, claim twice, or execute a proposal twice.
+
+high if it can corrupt accounting, reserves, proposal state, or escrow state.
+
+medium if it only causes duplicate events or temporary inconsistent state.
+
+# opbr-014: missing exists flag / default map state
+
+## summary
+
+maps can return default values for keys that were never created.
+
+if a function only checks a status map like `executed[id]`, `claimed[id]`, or `filled[id]`, an unknown id can look like a valid unexecuted object.
+
+example:
+
+```text
+executed[999] defaults to false
+!executed[999] is true
+execute(999) passes
+```
+
+the fix is to store and check an explicit existence flag.
+
+## where to look
+
+check functions like:
+
+- `execute`
+- `claim`
+- `redeem`
+- `cancel`
+- `fill_order`
+- `settle`
+- `finalize_message`
+- `vote`
+- `update_position`
+
+look for state like:
+
+```aml
+executed: map[int]bool
+claimed: map[int]bool
+filled: map[int]bool
+targets: map[int]address
+amounts: map[int]int
+```
+
+without:
+
+```aml
+exists: map[int]bool
+```
+
+## why it is dangerous
+
+unknown ids can pass checks that were meant for real objects.
+
+this can lead to:
+
+```text
+fake proposal execution
+fake claim execution
+fake order fill
+misleading events
+junk state writes
+default target or amount usage
+admin or bridge logic running on an object that was never created
+```
+
+## bad example
+
+```aml
+state {
+  next_id: int
+  targets: map[int]address
+  amounts: map[int]int
+  executed: map[int]bool
+}
+
+fn propose(target: address, amount: int): int {
+  assert_address(target)
+  require(amount > 0, "invalid amount")
+
+  let id = self.next_id
+  self.targets[id] = target
+  self.amounts[id] = amount
+  self.executed[id] = false
+  self.next_id = id + 1
+
+  return id
+}
+
+fn execute(id: int): bool {
+  require(!self.executed[id], "already executed")
+
+  self.executed[id] = true
+  require(transfer(self.targets[id], self.amounts[id]), "transfer failed")
+
+  return true
+}
+```
+
+why bad:
+
+```text
+execute(999) can pass if executed[999] defaults to false.
+the program marks an object as executed even though it was never proposed.
+```
+
+## fixed example
+
+```aml
+state {
+  next_id: int
+  exists: map[int]bool
+  targets: map[int]address
+  amounts: map[int]int
+  executed: map[int]bool
+}
+
+fn propose(target: address, amount: int): int {
+  assert_address(target)
+  require(amount > 0, "invalid amount")
+
+  let id = self.next_id
+  self.exists[id] = true
+  self.targets[id] = target
+  self.amounts[id] = amount
+  self.executed[id] = false
+  self.next_id = id + 1
+
+  return id
+}
+
+fn execute(id: int): bool {
+  require(id >= 0, "invalid id")
+  require(self.exists[id], "proposal not found")
+  require(!self.executed[id], "already executed")
+
+  self.executed[id] = true
+  require(transfer(self.targets[id], self.amounts[id]), "transfer failed")
+
+  return true
+}
+```
+
+## audit check
+
+flag id-based logic where:
+
+```text
+function accepts id/order_id/claim_id/message_id/position_id
+map[id] is read before an existence check
+only executed[id], claimed[id], filled[id], or voted[id] is checked
+there is no exists[id] / created[id] / owner[id] validation
+unknown id can write state or emit events
+```
+
+also check:
+
+```text
+id lower bound is missing
+id upper bound is missing
+default target/address/amount can be used
+exists flag is set after external action
+delete/close logic clears exists consistently
+```
+
+## rule of thumb
+
+```text
+for every id-based object, store exists[id] = true when it is created.
+before operating on id, require exists[id].
+then check status flags like executed[id] or claimed[id].
+```
+
+## severity
+
+critical if an unknown id can execute transfers, admin calls, bridge messages, or claims.
+
+high if it can corrupt proposal, order, claim, position, or message state.
+
+medium if it only creates misleading events or junk storage.
+
+# opbr-015: broken accounting / economic invariant
+
+## summary
+
+an invariant is a rule that must stay true after every action.
+
+this bug happens when all local checks pass, but the main accounting or economic rule becomes false.
+
+common examples:
+
+```text
+total_supply == sum(all balances)
+total_locked == sum(all deposits)
+total_shares == sum(all shares)
+reserve_a * reserve_b should not decrease in a constant-product AMM
+wrapped_supply <= locked_source_assets
+threshold <= number of unique signers
+```
+
+this is not always a missing `require(...)` on one line. it is often a mismatch between what the program checks and what the protocol actually needs to keep true.
+
+## invariant examples
+
+token:
+
+```text
+total_supply == sum(balances)
+transfer: total_supply is unchanged
+mint: total_supply increases by amount and receiver balance increases by amount
+burn: total_supply decreases by amount and holder balance decreases by amount
+allowance[from][spender] never increases during pull/transfer_from
+```
+
+simple OCT vault:
+
+```text
+total_locked == sum(deposits)
+total_locked <= actual program OCT balance
+deposit: deposits[user] and total_locked increase by the same value
+withdraw: deposits[user] and total_locked decrease by the same amount
+admin fees are separate from user deposits
+```
+
+share vault:
+
+```text
+total_shares == sum(shares)
+total_assets is enough to satisfy all user shares
+deposit mints shares > 0
+redeem burns shares > 0
+assets_out <= user claim on total_assets
+price per share changes only according to documented yield/fee/donation rules
+```
+
+AMM:
+
+```text
+reserve_a >= 0 and reserve_b >= 0
+reserves match actual balances after swaps and liquidity changes
+constant-product AMM: k = reserve_a * reserve_b does not decrease unexpectedly
+swap output > 0
+swap output < reserve_out
+LP total supply == sum(LP balances)
+add/remove liquidity keeps LP shares proportional to reserves
+```
+
+bridge:
+
+```text
+wrapped_supply <= locked_source_assets
+message/proof can be processed once
+minted amount equals verified message amount
+burn/release decreases wrapped or locked accounting exactly once
+proof binds recipient, amount, source chain/domain, and message id
+```
+
+governance / multisig:
+
+```text
+threshold > 0
+threshold <= unique_signer_count
+owners/signers are unique
+proposal exists before vote or execute
+each signer votes at most once
+vote_count == number of unique yes votes
+executed proposal cannot execute again
+executed proposal cannot be modified
+```
+
+fee accounting:
+
+```text
+fee_bps >= 0 and fee_bps <= 10000
+fee_amount <= amount
+protocol_fees <= actual balance not owed to users
+overpayment is refunded or explicitly accounted as payment
+treasury/fee recipient is valid
+```
+
+id lifecycle:
+
+```text
+exists[id] is true before operating on id
+id >= 0 and id < next_id
+status transition is valid
+closed/executed/cancelled object cannot be reused
+delete/close clears or freezes related state consistently
+```
+
+## where to look
+
+check:
+
+- token `transfer`, `mint`, `burn`, `pull`
+- vault `deposit`, `withdraw`, `redeem`, `harvest`
+- share vault `deposit`, `mint`, `redeem`
+- AMM `swap`, `add_liquidity`, `remove_liquidity`
+- bridge `lock`, `mint`, `burn`, `release`
+- multisig/governance `propose`, `vote`, `execute`
+- admin/emergency accounting
+
+## why it is dangerous
+
+broken invariants can make a program insolvent or economically wrong even when each function appears to run normally.
+
+examples:
+
+```text
+token balances no longer match total_supply
+vault user deposits no longer match total_locked
+shares are minted at the wrong price
+reserves drift away from actual balances
+wrapped assets are minted without backing
+governance threshold becomes impossible or too easy
+```
+
+## bad example: vault total not updated
+
+```aml
+state {
+  deposits: map[address]int
+  total_locked: int
+}
+
+payable fn deposit(): bool {
+  require(value > 0, "invalid deposit")
+
+  self.deposits[caller] += value
+
+  return true
+}
+```
+
+why bad:
+
+```text
+deposits[caller] increased, but total_locked did not.
+the invariant total_locked == sum(deposits) is broken.
+```
+
+## fixed example
+
+```aml
+state {
+  deposits: map[address]int
+  total_locked: int
+}
+
+payable fn deposit(): bool {
+  require(value > 0, "invalid deposit")
+
+  self.deposits[caller] += value
+  self.total_locked += value
+
+  return true
+}
+```
+
+## bad example: token supply drift
+
+```aml
+state {
+  balances: map[address]int
+  total_supply: int
+  owner: address
+}
+
+fn mint(to: address, amount: int): bool {
+  require(caller == self.owner, "not owner")
+  require(amount > 0, "invalid amount")
+  assert_address(to)
+
+  self.balances[to] += amount
+
+  return true
+}
+```
+
+why bad:
+
+```text
+new balance was created, but total_supply was not increased.
+the invariant total_supply == sum(balances) is broken.
+```
+
+## fixed example
+
+```aml
+state {
+  balances: map[address]int
+  total_supply: int
+  owner: address
+}
+
+fn mint(to: address, amount: int): bool {
+  require(caller == self.owner, "not owner")
+  require(amount > 0, "invalid amount")
+  assert_address(to)
+
+  self.total_supply += amount
+  self.balances[to] += amount
+
+  return true
+}
+```
+
+## audit check
+
+write down the invariant first, then check every function that can affect it.
+
+flag logic where:
+
+```text
+function updates user balance but not total
+function updates total but not user balance
+shares are minted without checking total_assets / total_shares
+reserves are updated without matching actual received/sent amounts
+bridge mints without a matching lock/proof/process flag
+threshold or owner count can make governance impossible
+emergency/admin path bypasses normal accounting
+```
+
+invariant examples to test:
+
+```text
+token: total_supply == sum(balances)
+vault: total_locked == sum(deposits)
+share vault: total_shares == sum(shares)
+amm: reserves match actual balances and k does not decrease unexpectedly
+bridge: wrapped_supply <= locked_assets
+governance: threshold <= unique_signer_count
+id lifecycle: exists[id] and status agree with allowed actions
+```
+
+reference links for more examples:
+
+- [EIP-20 ERC-20 token standard](https://eips.ethereum.org/EIPS/eip-20)
+- [EIP-4626 tokenized vault standard](https://eips.ethereum.org/EIPS/eip-4626)
+- [OpenZeppelin ERC-4626 docs](https://docs.openzeppelin.com/contracts/5.x/erc4626)
+- [Uniswap docs: how Uniswap works](https://developers.uniswap.org/docs/get-started/concepts/how-uniswap-works)
+- [Uniswap glossary: constant product formula](https://developers.uniswap.org/docs/get-started/concepts/glossary)
+
+## rule of thumb
+
+```text
+if a variable is a total, every function that changes an item must change the total too.
+if a function creates, burns, locks, unlocks, mints, or pays value, write the invariant it must preserve.
+```
+
+## severity
+
+critical if the broken invariant can mint value, drain funds, make a vault insolvent, or create unbacked bridge assets.
+
+high if it can corrupt accounting, shares, reserves, or governance execution.
+
+medium if it only affects reporting, events, or non-critical counters.
+
+# opbr-016: rounding / zero shares
+
+## summary
+
+AML integer math does not keep fractions.
+
+when a vault or AMM divides integers, the fractional part is lost.
+
+example:
+
+```text
+1 * 100 / 1000 = 0
+```
+
+in a share vault, this can mean a deposit is accepted, but the user receives `0` shares.
+
+## where to look
+
+check functions like:
+
+- `deposit`
+- `mint`
+- `redeem`
+- `withdraw`
+- `swap`
+- `add_liquidity`
+- `remove_liquidity`
+
+look for formulas like:
+
+```aml
+minted = amount * total_shares / total_assets
+assets_out = shares * total_assets / total_shares
+out = amount_in * reserve_out / reserve_in
+fee = amount * fee_bps / 10000
+```
+
+## why it is dangerous
+
+if the result rounds to zero and the program still updates state, users can lose value or accounting can drift.
+
+examples:
+
+```text
+deposit accepted but minted shares == 0
+redeem burns shares but assets_out == 0
+swap accepts input but output == 0
+fee rounds to zero when it should not
+```
+
+## bad example
+
+```aml
+state {
+  total_assets: int
+  total_shares: int
+  shares: map[address]int
+}
+
+fn deposit(amount: int): int {
+  require(amount > 0, "invalid amount")
+
+  let minted = amount * self.total_shares / self.total_assets
+
+  self.total_assets += amount
+  self.shares[caller] += minted
+  self.total_shares += minted
+
+  return minted
+}
+```
+
+why bad:
+
+```text
+if total_assets = 1000, total_shares = 100, and amount = 1:
+minted = 1 * 100 / 1000 = 0.
+the vault receives the deposit, but the user receives 0 shares.
+```
+
+## fixed example: reject zero shares
+
+```aml
+state {
+  total_assets: int
+  total_shares: int
+  shares: map[address]int
+}
+
+fn deposit(amount: int): int {
+  require(amount > 0, "invalid amount")
+
+  let minted = amount
+
+  if self.total_shares > 0 {
+    require(self.total_assets > 0, "bad vault state")
+    minted = amount * self.total_shares / self.total_assets
+  }
+
+  require(minted > 0, "deposit too small")
+
+  self.total_assets += amount
+  self.shares[caller] += minted
+  self.total_shares += minted
+
+  return minted
+}
+```
+
+## better pattern: scaled internal share units
+
+because there are no floats, store fractional shares as larger integer units.
+
+```text
+1 real share = 1_000_000 internal share units
+```
+
+```aml
+const SHARE_SCALE: int = 1000000
+
+state {
+  total_assets: int
+  total_shares: int
+  shares: map[address]int
+}
+
+fn deposit(amount: int): int {
+  require(amount > 0, "invalid amount")
+
+  let minted = amount * SHARE_SCALE
+
+  if self.total_shares > 0 {
+    require(self.total_assets > 0, "bad vault state")
+    minted = amount * self.total_shares / self.total_assets
+  }
+
+  require(minted > 0, "deposit too small")
+
+  self.total_assets += amount
+  self.shares[caller] += minted
+  self.total_shares += minted
+
+  return minted
+}
+```
+
+with scaled shares:
+
+```text
+total_assets = 1000
+total_shares = 100 * 1_000_000
+amount = 1
+minted = 1 * 100_000_000 / 1000 = 100_000
+```
+
+the user receives `0.1` real share represented as `100000` internal share units.
+
+## ethereum-style mitigations
+
+ERC-4626 vault implementations usually combine several defenses:
+
+```text
+reject zero shares
+use higher precision share units
+use virtual shares and virtual assets
+seed the vault / dead shares for the initial rate
+allow the user to pass min_shares as slippage protection
+```
+
+virtual shares/assets make the empty or low-liquidity vault rate harder to manipulate:
+
+```aml
+const VIRTUAL_ASSETS: int = 1
+const VIRTUAL_SHARES: int = 1000000
+
+let minted =
+  amount * (self.total_shares + VIRTUAL_SHARES) /
+  (self.total_assets + VIRTUAL_ASSETS)
+
+require(minted > 0, "deposit too small")
+```
+
+`min_shares` protects the user from receiving fewer shares than expected:
+
+```aml
+fn deposit(amount: int, min_shares: int): int {
+  require(amount > 0, "invalid amount")
+  require(min_shares > 0, "invalid min shares")
+
+  let minted = amount
+
+  if self.total_shares > 0 {
+    require(self.total_assets > 0, "bad vault state")
+    minted = amount * self.total_shares / self.total_assets
+  }
+
+  require(minted >= min_shares, "slippage")
+
+  self.total_assets += amount
+  self.shares[caller] += minted
+  self.total_shares += minted
+
+  return minted
+}
+```
+
+reference links:
+
+- [OpenZeppelin ERC-4626 docs](https://docs.openzeppelin.com/contracts/5.x/erc4626)
+- [OpenZeppelin: ERC4626 inflation attack defense](https://www.openzeppelin.com/news/a-novel-defense-against-erc4626-inflation-attacks)
+- [EIP-4626 tokenized vault standard](https://eips.ethereum.org/EIPS/eip-4626)
+
+## audit check
+
+flag share or output math where:
+
+```text
+division result can become zero
+deposit updates assets before checking minted > 0
+redeem burns shares before checking assets_out > 0
+swap accepts input before checking out > 0
+share accounting uses low precision units
+rounding direction is not documented
+no min_shares / min_out protection exists for user-facing deposits or swaps
+```
+
+also check:
+
+```text
+first deposit path is handled separately
+total_assets > 0 before dividing
+total_shares > 0 before proportional share math
+scaled internal units are used when small deposits should be supported
+virtual shares/assets or initial seed/dead shares are considered for empty vaults
+```
+
+## rule of thumb
+
+```text
+after any division that creates shares, assets_out, swap out, or fees, check the result is non-zero when zero is not meaningful.
+if fractional ownership matters, store it as scaled integer units.
+for user-facing deposits or swaps, let the user set min_shares or min_out.
+```
+
+## severity
+
+high if users can lose deposits, shares, redemptions, or swap inputs due to rounding.
+
+medium if it only rejects small users or causes small accounting drift.
+
+low if zero output is explicitly intended and documented.
+
+# opbr-017: bad id bounds / negative id
+
+## summary
+
+many AML programs use `int` ids for proposals, claims, orders, models, and positions.
+
+if a function checks only the upper bound, a negative id can pass.
+
+bad pattern:
+
+```aml
+require(id < self.next_id, "invalid id")
+```
+
+missing:
+
+```aml
+require(id >= 0, "invalid id")
+```
+
+## where to look
+
+check functions like:
+
+- `execute(id)`
+- `claim(id)`
+- `vote(id)`
+- `cancel(id)`
+- `fill_order(id)`
+- `get_model(id)`
+- `update_position(id)`
+- `finalize_message(id)`
+
+look for:
+
+```aml
+require(id < self.next_id, "invalid id")
+require(id < self.count, "invalid id")
+require(id <= self.max_id, "invalid id")
+```
+
+without a matching lower-bound check.
+
+## why it is dangerous
+
+negative ids can read or write unexpected map slots, bypass existence logic, or operate on default state.
+
+this can lead to:
+
+```text
+fake proposal execution
+invalid claim or order state
+negative model/position access
+junk state writes
+default map values being treated as real objects
+```
+
+## bad example
+
+```aml
+state {
+  next_id: int
+  exists: map[int]bool
+  executed: map[int]bool
+}
+
+fn execute(id: int): bool {
+  require(id < self.next_id, "invalid id")
+  require(self.exists[id], "not found")
+  require(!self.executed[id], "already executed")
+
+  self.executed[id] = true
+  return true
+}
+```
+
+## fixed example
+
+```aml
+state {
+  next_id: int
+  exists: map[int]bool
+  executed: map[int]bool
+}
+
+fn execute(id: int): bool {
+  require(id >= 0, "invalid id")
+  require(id < self.next_id, "invalid id")
+  require(self.exists[id], "not found")
+  require(!self.executed[id], "already executed")
+
+  self.executed[id] = true
+  return true
+}
+```
+
+## audit check
+
+flag id-based functions where:
+
+```text
+id is int
+id is user-controlled
+id is checked with id < count or id < next_id
+there is no require(id >= 0)
+map[id] is read or written
+```
+
+also check:
+
+```text
+id lower bound is checked before map reads
+id upper bound matches the creation range
+exists[id] is checked for object ids
+closed/deleted ids cannot be reused accidentally
+```
+
+## rule of thumb
+
+```text
+for int ids, check both sides: id >= 0 and id < next_id.
+then check exists[id].
+```
+
+## severity
+
+high if negative ids can execute, claim, vote, withdraw, or mutate important state.
+
+medium if they only create junk storage or bad reads.
+
+low if all negative ids are harmless view-only reads.
+
+# opbr-018: duplicate signer / bad threshold
+
+## summary
+
+multisigs, committees, bridge validators, and governance systems need a valid quorum.
+
+the signer set must be unique, and the threshold must be possible.
+
+bad states:
+
+```text
+threshold == 0
+threshold > unique_signer_count
+same signer appears twice
+same signer can vote twice
+```
+
+## where to look
+
+check:
+
+- constructors
+- owner/signer setup
+- `add_owner`
+- `remove_owner`
+- `set_threshold`
+- `vote`
+- `execute`
+- bridge guardian or validator setup
+
+look for state like:
+
+```aml
+owners: list[address]
+threshold: int
+votes: map[int]map[address]bool
+vote_counts: map[int]int
+```
+
+## why it is dangerous
+
+duplicate signers can make a quorum easier than intended.
+
+bad thresholds can make governance impossible or let anyone execute.
+
+examples:
+
+```text
+same address is added twice and counts as two owners
+threshold is set to 0 and execution requires no real approval
+threshold is larger than owner count and execution is permanently stuck
+removed signer can still vote
+vote_count does not match unique yes votes
+```
+
+## bad example
+
+```aml
+state {
+  owners: list[address]
+  threshold: int
+}
+
+constructor(a: address, b: address, threshold_val: int) {
+  assert_address(a)
+  assert_address(b)
+
+  self.owners.push(a)
+  self.owners.push(b)
+  self.threshold = threshold_val
+}
+```
+
+why bad:
+
+```text
+a and b can be the same address.
+threshold can be 0.
+threshold can be greater than the number of unique owners.
+```
+
+## fixed example
+
+```aml
+state {
+  owners: list[address]
+  is_owner: map[address]bool
+  threshold: int
+  owner_count: int
+}
+
+constructor(a: address, b: address, threshold_val: int) {
+  assert_address(a)
+  assert_address(b)
+  require(a != b, "duplicate owner")
+  require(threshold_val > 0, "invalid threshold")
+  require(threshold_val <= 2, "threshold too high")
+
+  self.owners.push(a)
+  self.owners.push(b)
+  self.is_owner[a] = true
+  self.is_owner[b] = true
+  self.owner_count = 2
+  self.threshold = threshold_val
+}
+```
+
+## audit check
+
+flag multisig/governance logic where:
+
+```text
+owners/signers can contain duplicates
+threshold can be zero
+threshold can exceed unique signer count
+vote_count increments without checking signer is unique
+removed signer can still vote
+owner_count and owner list can drift apart
+```
+
+also check:
+
+```text
+set_threshold validates the new threshold
+add_owner rejects duplicates
+remove_owner updates owner_count and threshold constraints
+execute checks vote_count >= threshold
+proposal cannot be executed twice
+```
+
+## rule of thumb
+
+```text
+quorum math must use unique signers, not list length if duplicates are possible.
+always enforce 0 < threshold <= unique_signer_count.
+```
+
+## severity
+
+critical if duplicate signers or bad thresholds allow unauthorized execution, bridge minting, or treasury movement.
+
+high if governance can become permanently stuck or too easy to pass.
+
+medium if only metadata or non-critical settings are affected.
+
+# opbr-019: pause / emergency bypass
+
+## summary
+
+pause and emergency controls must cover every path that can move funds or change critical state.
+
+this bug happens when one function checks `paused`, but another equivalent path does not.
+
+examples:
+
+```text
+transfer is paused, but pull still works
+withdraw is paused, but claim still pays out
+swap is paused, but remove_liquidity still drains reserves
+emergency_withdraw can take user deposits instead of only protocol fees
+```
+
+## where to look
+
+check functions like:
+
+- `transfer`
+- `pull`
+- `withdraw`
+- `claim`
+- `redeem`
+- `swap`
+- `remove_liquidity`
+- `admin_withdraw`
+- `emergency_withdraw`
+- `pause`
+- `unpause`
+
+look for state like:
+
+```aml
+paused: bool
+owner: address
+treasury: int
+total_locked: int
+deposits: map[address]int
+```
+
+## why it is dangerous
+
+a pause that does not pause all value-moving paths gives a false sense of safety.
+
+an emergency function that ignores user accounting can drain funds that belong to users.
+
+## bad example
+
+```aml
+state {
+  paused: bool
+  balances: map[address]int
+  grants: map[address]map[address]int
+}
+
+fn transfer(to: address, amount: int): bool {
+  require(!self.paused, "paused")
+  require(amount > 0, "invalid amount")
+
+  let bal = self.balances[caller]
+  require(bal >= amount, "insufficient balance")
+
+  self.balances[caller] = bal - amount
+  self.balances[to] += amount
+  return true
+}
+
+fn pull(from: address, to: address, amount: int): bool {
+  require(amount > 0, "invalid amount")
+
+  let allowed = self.grants[from][caller]
+  require(allowed >= amount, "not allowed")
+
+  let bal = self.balances[from]
+  require(bal >= amount, "insufficient balance")
+
+  self.grants[from][caller] = allowed - amount
+  self.balances[from] = bal - amount
+  self.balances[to] += amount
+  return true
+}
+```
+
+## fixed example
+
+```aml
+state {
+  paused: bool
+  balances: map[address]int
+  grants: map[address]map[address]int
+}
+
+fn transfer(to: address, amount: int): bool {
+  require(!self.paused, "paused")
+  require(amount > 0, "invalid amount")
+
+  let bal = self.balances[caller]
+  require(bal >= amount, "insufficient balance")
+
+  self.balances[caller] = bal - amount
+  self.balances[to] += amount
+  return true
+}
+
+fn pull(from: address, to: address, amount: int): bool {
+  require(!self.paused, "paused")
+  require(amount > 0, "invalid amount")
+
+  let allowed = self.grants[from][caller]
+  require(allowed >= amount, "not allowed")
+
+  let bal = self.balances[from]
+  require(bal >= amount, "insufficient balance")
+
+  self.grants[from][caller] = allowed - amount
+  self.balances[from] = bal - amount
+  self.balances[to] += amount
+  return true
+}
+```
+
+## emergency withdraw check
+
+bad:
+
+```aml
+fn emergency_withdraw(amount: int): bool {
+  require(caller == self.owner, "not owner")
+  require(amount > 0, "invalid amount")
+
+  require(transfer(caller, amount), "transfer failed")
+  return true
+}
+```
+
+better:
+
+```aml
+fn emergency_withdraw_fees(amount: int): bool {
+  require(caller == self.owner, "not owner")
+  require(amount > 0, "invalid amount")
+  require(self.protocol_fees >= amount, "insufficient fees")
+
+  self.protocol_fees -= amount
+  require(transfer(caller, amount), "transfer failed")
+  return true
+}
+```
+
+## audit check
+
+flag pause/emergency logic where:
+
+```text
+only one transfer path checks paused
+pull/transfer_from bypasses pause
+withdraw is paused but claim/redeem is not
+admin or emergency withdraw can touch user deposits
+pause/unpause lacks auth
+pause state is checked after state changes
+```
+
+also check:
+
+```text
+every value-moving function has a clear pause policy
+read-only views remain available if intended
+emergency withdraw only moves protocol-owned funds
+events are emitted for pause/unpause/emergency actions
+```
+
+## rule of thumb
+
+```text
+list every function that can move value or change critical accounting.
+decide whether pause should block it.
+then verify the check exists on every path.
+```
+
+## severity
+
+critical if pause bypass or emergency withdraw can drain user funds.
+
+high if a system cannot be safely stopped during an incident.
+
+medium if only non-critical operations bypass pause.
+
+# opbr-020: unbounded loops / resource DoS
+
+## summary
+
+loops over user-controlled or ever-growing data can make a function too expensive or impossible to execute.
+
+in Ethereum this is gas DoS. in AML programs, treat it as resource or execution DoS.
+
+bad patterns:
+
+```aml
+for i in 0..n {
+  ...
+}
+```
+
+where `n` is controlled by a user or grows without a cap.
+
+## where to look
+
+check functions like:
+
+- `batch_transfer`
+- `batch_vote`
+- `batch_claim`
+- `distribute_rewards`
+- `settle_all`
+- `cleanup`
+- `remove_owner`
+- `execute_all`
+- `harvest`
+
+look for state like:
+
+```aml
+owners: list[address]
+users: list[address]
+stakers: list[address]
+proposal_count: int
+reward_count: int
+```
+
+## why it is dangerous
+
+an attacker can make a function process too many items.
+
+this can lead to:
+
+```text
+withdrawals become impossible
+reward distribution gets stuck
+governance execution cannot finish
+cleanup can never complete
+one user's data makes everyone else's function fail
+```
+
+## bad example
+
+```aml
+state {
+  users: list[address]
+  rewards: map[address]int
+}
+
+fn distribute_rewards(amount_each: int): bool {
+  require(amount_each > 0, "invalid amount")
+
+  for i in 0..len(self.users) {
+    let user = self.users[i]
+    self.rewards[user] += amount_each
+  }
+
+  return true
+}
+```
+
+why bad:
+
+```text
+self.users can grow forever.
+distribute_rewards eventually becomes too expensive or impossible.
+```
+
+## fixed example: bounded batch
+
+```aml
+state {
+  users: list[address]
+  rewards: map[address]int
+}
+
+fn distribute_rewards(start: int, limit: int, amount_each: int): int {
+  require(start >= 0, "invalid start")
+  require(limit > 0, "invalid limit")
+  require(limit <= 100, "limit too high")
+  require(amount_each > 0, "invalid amount")
+
+  let end = start + limit
+  if end > len(self.users) {
+    end = len(self.users)
+  }
+
+  for i in start..end {
+    let user = self.users[i]
+    self.rewards[user] += amount_each
+  }
+
+  return end
+}
+```
+
+## better pattern: pull over push
+
+instead of looping over every user, let each user claim their own amount.
+
+```aml
+state {
+  reward_per_user: int
+  claimed: map[address]bool
+}
+
+fn claim_reward(): bool {
+  require(!self.claimed[caller], "already claimed")
+  require(self.reward_per_user > 0, "no reward")
+
+  self.claimed[caller] = true
+  require(transfer(caller, self.reward_per_user), "transfer failed")
+  return true
+}
+```
+
+## audit check
+
+flag loops where:
+
+```text
+loop bound is user-controlled
+loop bound is len(list) and list can grow forever
+batch size has no max
+one call tries to process all users/proposals/rewards
+loop performs transfer(...) or call(...)
+cleanup requires iterating over all historical ids
+```
+
+also check:
+
+```text
+limit parameter has a hard cap
+progress can resume from a cursor/index
+users can claim individually instead of being pushed to
+loop cannot be forced to include invalid/stuck entries
+```
+
+## rule of thumb
+
+```text
+never require one transaction/call to process an unbounded list.
+use bounded batches, cursors, or pull-based claims.
+```
+
+## severity
+
+high if unbounded loops can freeze withdrawals, claims, governance, or reward distribution.
+
+medium if only admin maintenance or cleanup can get stuck.
+
+low if the loop is over a small fixed-size list.
